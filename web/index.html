@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Network Topology</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🕸️</text></svg>" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <header class="brand">
+        <div class="brand-mark">🕸️</div>
+        <div>
+          <h1>Network Topology</h1>
+          <p id="brand-sub">no scan loaded</p>
+        </div>
+      </header>
+
+      <section class="block">
+        <h2>Scan</h2>
+        <label class="field">
+          <span>Profile</span>
+          <select id="profile">
+            <option value="quick">quick — hosts only</option>
+            <option value="normal" selected>normal — top 100 ports</option>
+            <option value="deep">deep — 500 ports + OS</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Target <em>(blank = auto)</em></span>
+          <input id="target" type="text" placeholder="10.0.0.0/24" spellcheck="false" />
+        </label>
+        <label class="check">
+          <input id="sudo" type="checkbox" />
+          <span>Use <code>sudo -n</code> (ARP scan, OS detection)</span>
+        </label>
+        <button id="scan" class="primary">Run scan</button>
+        <div id="progress" class="progress" hidden>
+          <div class="bar"><div id="bar-fill"></div></div>
+          <p id="progress-text">starting…</p>
+        </div>
+      </section>
+
+      <section class="block">
+        <h2>Summary</h2>
+        <div class="stats" id="stats"></div>
+      </section>
+
+      <section class="block">
+        <h2>Device types <button id="clear-filter" class="link" hidden>clear filter</button></h2>
+        <ul class="legend" id="legend"></ul>
+      </section>
+
+      <section class="block" id="warnings-block" hidden>
+        <h2>Notes</h2>
+        <ul class="warnings" id="warnings"></ul>
+      </section>
+
+      <footer class="foot">
+        <span id="meta-line"></span>
+      </footer>
+    </aside>
+
+    <main class="main">
+      <div class="toolbar">
+        <div class="search">
+          <span aria-hidden="true">⌕</span>
+          <input id="search" type="search" placeholder="Search name, IP, MAC, vendor, port…  (/)" spellcheck="false" />
+        </div>
+        <label class="inline-field">
+          <span>Group</span>
+          <select id="group">
+            <option value="category" selected>by type</option>
+            <option value="vendor">by vendor</option>
+            <option value="none">flat</option>
+          </select>
+        </label>
+        <div class="spacer"></div>
+        <div class="btn-group">
+          <button id="expand" title="Expand all (e)">Expand</button>
+          <button id="collapse" title="Collapse all (c)">Collapse</button>
+        </div>
+        <div class="btn-group">
+          <button id="zoom-out" title="Zoom out">−</button>
+          <button id="fit" title="Fit to view (f)">Fit</button>
+          <button id="zoom-in" title="Zoom in">+</button>
+        </div>
+        <div class="btn-group">
+          <button id="export-svg" title="Download the map as SVG">SVG</button>
+          <button id="export-json" title="Download the scan data">JSON</button>
+        </div>
+      </div>
+
+      <div class="canvas" id="canvas">
+        <svg id="map" xmlns="http://www.w3.org/2000/svg">
+          <g id="viewport">
+            <g id="links"></g>
+            <g id="nodes"></g>
+          </g>
+        </svg>
+        <div class="empty" id="empty">
+          <div class="empty-card">
+            <h3>No topology yet</h3>
+            <p>Run a scan to discover the devices on your network and draw the tree.</p>
+            <button id="empty-scan" class="primary">Run scan</button>
+            <p class="fine">Only scan networks you are responsible for.</p>
+          </div>
+        </div>
+
+        <!-- Inside .canvas so the drawer overlays the map, never the toolbar. -->
+        <aside class="drawer" id="drawer" hidden>
+          <button class="drawer-close" id="drawer-close" title="Close (Esc)">×</button>
+          <div id="drawer-body"></div>
+        </aside>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

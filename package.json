@@ -1,0 +1,19 @@
+{
+  "name": "topology",
+  "version": "1.0.0",
+  "description": "Scan the local network and render it as an interactive topology tree in the browser",
+  "type": "module",
+  "bin": {
+    "topology": "./src/cli.js"
+  },
+  "scripts": {
+    "scan": "node src/cli.js scan",
+    "serve": "node src/cli.js serve",
+    "start": "node src/cli.js serve --scan"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {},
+  "license": "MIT"
+}
