@@ -79,7 +79,7 @@ export function createTrafficMonitor({ onEvent = () => {} } = {}) {
     ifaces = null,
     filter = null,
     snapshotMs = 1000,
-    windowSeconds = 90,
+    windowSeconds = null,
     maxFlows = 4000,
   } = {}) {
     if (state.running) return { started: false, reason: 'a capture is already running' };
@@ -95,9 +95,18 @@ export function createTrafficMonitor({ onEvent = () => {} } = {}) {
     const selfIps = survey.subnets.map((s) => s.address).filter(Boolean);
     const localCidrs = survey.subnets.filter((s) => !s.isTunnel).map((s) => s.cidr);
 
+    // The ring has to cover the window the user asked for, or the start of a
+    // two-minute capture is discarded rather than merely scrolled off: a fixed
+    // 90 buckets silently threw away the first 30 seconds. A little headroom
+    // absorbs the lag between the request and the first packet.
+    const requested = Number.isFinite(windowSeconds) && windowSeconds > 0
+      ? windowSeconds
+      : (seconds > 0 ? seconds + 10 : 300); // "until stopped" needs some bound
+    const buckets = Math.max(60, Math.min(600, Math.ceil(requested)));
+
     state.table = new FlowTable({
       bucketMs: 1000,
-      windowBuckets: Math.max(10, Math.min(600, windowSeconds)),
+      windowBuckets: buckets,
       maxFlows,
       selfIps,
       localCidrs,
@@ -139,6 +148,7 @@ export function createTrafficMonitor({ onEvent = () => {} } = {}) {
           sees: 'This machine\'s own traffic plus every broadcast and multicast frame on the segment. Unicast between two other devices is not visible from here — a switch does not forward it to this port.',
           startedAt: Date.now(),
           seconds,
+          windowSeconds: buckets,
         }
       : {
           method: 'connections',
@@ -149,6 +159,7 @@ export function createTrafficMonitor({ onEvent = () => {} } = {}) {
           sees: 'Sockets this machine has open. Every conversation shown has this machine at one end, and the sizes are connection counts, not bytes.',
           startedAt: Date.now(),
           seconds,
+          windowSeconds: buckets,
         };
 
     emit('traffic-started', {

@@ -40,8 +40,8 @@ export function createHeatmapView({
   const $ = (id) => document.getElementById(id);
   const dom = {};
   for (const id of [
-    'h-grid', 'h-empty', 'h-empty-title', 'h-empty-blurb', 'h-empty-clear',
-    'h-metric', 'h-rows', 'h-scale', 'h-search', 'h-export-csv',
+    'h-grid', 'h-canvas', 'h-empty', 'h-empty-title', 'h-empty-blurb', 'h-empty-clear',
+    'h-metric', 'h-rows', 'h-scale', 'h-density', 'h-search', 'h-export-csv',
     'h-legend-min', 'h-legend-max', 'h-legend-bar', 'h-summary',
     'h-drawer', 'h-drawer-body', 'h-drawer-close', 'h-tooltip',
   ]) dom[id] = $(id);
@@ -50,6 +50,7 @@ export function createHeatmapView({
     metric: 'total',
     rows: 20,
     perRowScale: false, // false = one scale across all rows, so rows compare
+    cell: 7,            // column width in px; the grid scrolls rather than shrinks
     query: '',
     graph: { nodes: [], edges: [], unit: 'bytes' },
     selected: null,
@@ -70,7 +71,7 @@ export function createHeatmapView({
 
   /** Rows for the chosen metric, biggest first, with their per-second series. */
   function rankedRows() {
-    const metric = METRICS[view.metric];
+    const metric = METRICS[view.metric] || METRICS.total;
     // Series are trimmed to the elapsed part of the window, so a short capture
     // fills the strip instead of hiding in its last few columns.
     const shown = visibleBuckets(view.graph);
@@ -91,7 +92,7 @@ export function createHeatmapView({
     if (!view.visible) return;
     const rows = rankedRows();
     const unit = view.graph.unit;
-    const metric = METRICS[view.metric];
+    const metric = METRICS[view.metric] || METRICS.total;
     const window = store.state.snapshot?.window;
     const buckets = visibleBuckets(view.graph);
     const bucketMs = window?.bucketMs || 1000;
@@ -112,6 +113,13 @@ export function createHeatmapView({
       `linear-gradient(90deg, var(--bg-soft) 0%, ${metric.hue} 100%)`;
 
     const grid = dom['h-grid'];
+    const wrap = dom['h-canvas'];
+    // A live view should follow "now" unless the reader has scrolled back to
+    // look at something, so the right edge is only re-pinned if it was already
+    // there before the redraw.
+    const wasAtRight = wrap.scrollWidth - wrap.scrollLeft - wrap.clientWidth < 12;
+
+    grid.style.setProperty('--hm-cell', `${view.cell}px`);
     grid.replaceChildren();
     if (!rows.length) return;
 
@@ -119,17 +127,21 @@ export function createHeatmapView({
     for (const row of rows) {
       grid.append(dataRow(row, { unit, metric, globalMax, buckets, bucketMs, endsAt }));
     }
+    if (wasAtRight) wrap.scrollLeft = wrap.scrollWidth;
   }
 
   function headerRow(buckets, bucketMs, endsAt) {
     const head = el('div', { className: 'hm-row hm-head' });
-    head.append(el('div', { className: 'hm-label', text: 'device' }));
-    head.append(el('div', { className: 'hm-num', text: 'sent' }));
-    head.append(el('div', { className: 'hm-num', text: 'recv' }));
+    head.append(el('div', { className: 'hm-fixed' }, [
+      el('div', { className: 'hm-label', text: 'device' }),
+      el('div', { className: 'hm-num', text: 'sent' }),
+      el('div', { className: 'hm-num', text: 'recv' }),
+    ]));
 
-    // Only a few ticks: one per second would be unreadable at 90 columns.
+    // One label per second would be unreadable; space them by how many columns
+    // a label actually needs at the current width.
     const strip = el('div', { className: 'hm-strip hm-axis' });
-    const step = Math.max(1, Math.round(buckets / 6));
+    const step = Math.max(1, Math.ceil(34 / view.cell));
     for (let i = 0; i < buckets; i++) {
       const cell = el('div', { className: 'hm-tick' });
       if (i % step === 0 || i === buckets - 1) {
@@ -153,13 +165,14 @@ export function createHeatmapView({
       el('span', { className: 'hm-name', text: node.label }),
     ]);
     label.setAttribute('title', node.ip || node.label);
-    line.append(label);
 
-    // The two totals sit beside every row whichever metric is ranking, so a
+    // Both totals sit beside every row whichever metric is ranking, so a
     // top-senders view still shows what that device pulled down.
-    const sent = el('div', { className: `hm-num${view.metric === 'sent' ? ' active' : ''}`, text: formatWeight(node.sentBytes, unit) });
-    const recv = el('div', { className: `hm-num${view.metric === 'received' ? ' active' : ''}`, text: formatWeight(node.recvBytes, unit) });
-    line.append(sent, recv);
+    line.append(el('div', { className: 'hm-fixed' }, [
+      label,
+      el('div', { className: `hm-num${view.metric === 'sent' ? ' active' : ''}`, text: formatWeight(node.sentBytes, unit) }),
+      el('div', { className: `hm-num${view.metric === 'received' ? ' active' : ''}`, text: formatWeight(node.recvBytes, unit) }),
+    ]));
 
     const rowMax = view.perRowScale
       ? Math.max(1, ...(series || [0]))
@@ -412,7 +425,8 @@ export function createHeatmapView({
   /* --------------------------------------------------------------- wire up */
 
   dom['h-metric'].addEventListener('change', () => {
-    view.metric = dom['h-metric'].value;
+    const chosen = dom['h-metric'].value;
+    view.metric = chosen in METRICS ? chosen : 'total';
     render();
   });
   dom['h-rows'].addEventListener('change', () => {
@@ -421,6 +435,10 @@ export function createHeatmapView({
   });
   dom['h-scale'].addEventListener('change', () => {
     view.perRowScale = dom['h-scale'].value === 'row';
+    render();
+  });
+  dom['h-density'].addEventListener('change', () => {
+    view.cell = Number(dom['h-density'].value) || 7;
     render();
   });
   dom['h-export-csv'].addEventListener('click', exportCsv);

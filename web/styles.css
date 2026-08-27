@@ -472,15 +472,20 @@ button.link {
 }
 
 .heatmap {
+  --hm-cell: 7px;
+  --hm-label-w: 186px;
+  --hm-num-w: 72px;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 640px;
+  /* As wide as the columns need. The wrapper scrolls, rather than the cells
+     shrinking to slivers once a window runs past a couple of minutes. */
+  width: max-content;
+  min-width: 100%;
 }
 
 .hm-row {
-  display: grid;
-  grid-template-columns: 190px 74px 74px 1fr;
+  display: flex;
   align-items: center;
   gap: 8px;
   border-radius: 6px;
@@ -489,6 +494,26 @@ button.link {
 }
 .hm-row:hover { background: var(--bg-soft); }
 .hm-row.selected { background: #142331; outline: 1px solid var(--accent-dim); }
+
+/* Name and totals stay put while the time axis scrolls under them, so a row is
+   still identifiable at -110s. One sticky wrapper rather than three sticky
+   columns: a single `left: 0` needs no per-column offset arithmetic to keep the
+   frozen columns from overlapping or gapping. It needs an opaque background,
+   which has to track the row's hover and selected states. */
+.hm-fixed {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  flex: none;
+  display: grid;
+  grid-template-columns: var(--hm-label-w) var(--hm-num-w) var(--hm-num-w);
+  align-items: center;
+  gap: 8px;
+  padding-right: 8px;
+  background: var(--bg);
+}
+.hm-row:hover .hm-fixed { background: var(--bg-soft); }
+.hm-row.selected .hm-fixed { background: #142331; }
 
 .hm-head {
   cursor: default;
@@ -499,8 +524,14 @@ button.link {
   padding-bottom: 4px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 2px;
+  /* Keeps the time axis visible while scrolling down a long ranking. */
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--bg);
 }
 .hm-head:hover { background: none; }
+.hm-head .hm-fixed { z-index: 4; background: var(--bg); }
 
 .hm-label { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 12.5px; }
 .hm-icon { flex: none; font-size: 12px; }
@@ -520,11 +551,10 @@ button.link {
   display: flex;
   gap: 1px;
   height: 18px;
-  min-width: 0;
 }
 .hm-cell {
-  flex: 1 1 0;
-  min-width: 0;
+  width: var(--hm-cell);
+  flex: none;
   border-radius: 1px;
   background: var(--bg-soft);
 }
@@ -532,8 +562,8 @@ button.link {
 
 .hm-axis { height: auto; align-items: flex-end; }
 .hm-tick {
-  flex: 1 1 0;
-  min-width: 0;
+  width: var(--hm-cell);
+  flex: none;
   font-size: 9px;
   color: var(--text-faint);
   white-space: nowrap;
@@ -573,5 +603,5 @@ button.link {
   .sidebar { display: none; }
   .drawer { width: 100%; }
   .tabs { padding: 8px 10px 0; }
-  .hm-row { grid-template-columns: 130px 60px 60px 1fr; }
+  .heatmap { --hm-label-w: 128px; --hm-num-w: 58px; }
 }

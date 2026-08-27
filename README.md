@@ -322,11 +322,25 @@ living-room-sonos      0 B     4.2 kB   ▁▁▂▁▁▂▁▁▁▂▁▁▁�
 - Both totals sit beside every row whichever metric is ranking, so a
   top-senders view still shows what each device pulled down. The active column
   is highlighted.
+- **Rows** goes up to 40, which is as many activity strips as a streaming
+  snapshot carries; asking for more would show rows with no strip against them.
 - **Scale** is shared across rows by default, which is what makes a ranked view
   comparable. Switching to per-row rescales each strip to its own peak, which
   reveals the shape of a quiet device's activity that a shared scale flattens.
 - Shading is square-rooted. Byte counts are heavy-tailed, and on a linear ramp
   everything but the single busiest second reads as idle.
+- **How much history is kept follows the capture window you asked for.** A
+  two-minute capture retains two minutes; the ring buffer is sized from the
+  request rather than fixed, which it previously was — a 90-bucket ring
+  *discarded* the first half-minute of a two-minute capture rather than merely
+  scrolling it off. "Until stopped" keeps the last 5 minutes, and 10 minutes is
+  the ceiling, since the history has to be bounded by something.
+- The grid **scrolls horizontally** once the window outruns the width, and the
+  device name and both totals stay frozen at the left so a row is still
+  identifiable at -110s. **Columns** sets the cell width — narrow to take in a
+  long capture at a glance, wide to read individual seconds.
+- The view follows *now* on its own, but stops doing so while you are scrolled
+  back looking at something, and resumes when you return to the live edge.
 - The window trims to however long the capture has actually run, so a
   ten-second capture fills the strip instead of hiding in its last few columns.
 - Hovering a cell gives the exact figure and timestamp; clicking a row opens the
@@ -396,6 +410,11 @@ devices appear as soon as they broadcast.
 
 **Traffic shows "conns" instead of bytes.** Same cause: no capture, so there are
 no byte counts to show. The sidebar's vantage panel says which method is running.
+
+**The heatmap axis stops short of the capture window.** It only extends as far
+as the capture has actually run, so it grows towards the full window rather than
+starting there. If it stops short of a window that *has* elapsed, the retained
+history is the limit — 10 minutes at most, or 5 for "until stopped".
 
 **The heatmap is empty but the traffic map has data.** The ranking needs a
 non-zero figure in the chosen direction. Nothing has *sent* anything if you are
