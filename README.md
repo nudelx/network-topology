@@ -5,7 +5,8 @@ Scan the local network and render it as an interactive topology tree in the brow
 ![tree](docs/screenshot.png)
 
 <img width="1896" height="1275" alt="Screenshot 2026-08-27 at 13 52 10" src="https://github.com/user-attachments/assets/4d4826dc-c769-4e64-9816-e41d3764e7bf" />
-<img width="1896" height="1275" alt="Screenshot 2026-08-27 at 13 52 10" src="https://github.com/user-attachments/assets/14093498-9e57-4da5-ac5f-ef22166b432b" />
+<img width="1903" height="1128" alt="Screenshot 2026-08-27 at 13 51 52" src="https://github.com/user-attachments/assets/b396b14a-752d-4c6e-8676-08f00c3aa1f8" />
+
 
 
 - **Discovery** via `nmap` when it is installed, with a pure-Node ICMP + TCP + ARP sweep as a fallback.
