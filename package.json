@@ -8,6 +8,7 @@
   },
   "scripts": {
     "scan": "node src/cli.js scan",
+    "traffic": "node src/cli.js traffic",
     "serve": "node src/cli.js serve",
     "start": "node src/cli.js serve --scan"
   },

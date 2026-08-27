@@ -1,5 +1,7 @@
 import { buildTree, countDevices } from '/shared/topology.js';
 import { CATEGORIES } from '/shared/classify.js';
+import { createCanvas, exportSvgFile, download } from '/canvas.js';
+import { createTrafficView } from '/traffic.js';
 
 /**
  * Topology map front-end. Imports the same tree builder the CLI uses, lays the
@@ -22,7 +24,6 @@ const state = {
   query: '',
   catFilter: new Set(),
   selectedId: null,
-  view: { x: 0, y: 0, k: 1 },
   scanning: false,
 };
 
@@ -246,11 +247,6 @@ function render() {
   applyTransform();
 }
 
-function applyTransform() {
-  const { x, y, k } = state.view;
-  dom.viewport.setAttribute('transform', `translate(${x},${y}) scale(${k})`);
-}
-
 function contentBounds() {
   if (!state.nodes.length) return { minX: 0, minY: 0, maxX: 1, maxY: 1 };
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -263,34 +259,18 @@ function contentBounds() {
   return { minX, minY, maxX, maxY };
 }
 
-function fitToView() {
-  const rect = dom.canvas.getBoundingClientRect();
-  const b = contentBounds();
-  const pad = 44;
-  const k = Math.min(
-    (rect.width - pad * 2) / Math.max(1, b.maxX - b.minX),
-    (rect.height - pad * 2) / Math.max(1, b.maxY - b.minY),
-    1.15,
-  );
-  state.view.k = Math.max(0.08, k);
-  state.view.x = pad - b.minX * state.view.k
-    + Math.max(0, (rect.width - pad * 2 - (b.maxX - b.minX) * state.view.k) / 2);
-  state.view.y = pad - b.minY * state.view.k
-    + Math.max(0, (rect.height - pad * 2 - (b.maxY - b.minY) * state.view.k) / 2);
-  applyTransform();
-}
-
-function zoomBy(factor, cx, cy) {
-  const rect = dom.canvas.getBoundingClientRect();
-  const px = cx ?? rect.width / 2;
-  const py = cy ?? rect.height / 2;
-  const k = Math.min(2.6, Math.max(0.06, state.view.k * factor));
-  const ratio = k / state.view.k;
-  state.view.x = px - (px - state.view.x) * ratio;
-  state.view.y = py - (py - state.view.y) * ratio;
-  state.view.k = k;
-  applyTransform();
-}
+const canvas = createCanvas({
+  svg: dom.map,
+  viewport: dom.viewport,
+  container: dom.canvas,
+  getBounds: contentBounds,
+  onBackgroundClick: () => {
+    state.selectedId = null;
+    closeDrawer();
+    render();
+  },
+});
+const { view, applyTransform, fitToView, zoomBy } = canvas;
 
 /* ----------------------------------------------------------- interaction */
 
@@ -299,7 +279,7 @@ function onNodeClick(node) {
   // changes every sibling's row, and without this the map jumps away.
   const before = state.nodes.find((n) => n.id === node.id);
   const anchor = before
-    ? { x: state.view.x + before.x * state.view.k, y: state.view.y + before.y * state.view.k }
+    ? { x: view.x + before.x * view.k, y: view.y + before.y * view.k }
     : null;
 
   if (node.childCount > 0) {
@@ -311,8 +291,8 @@ function onNodeClick(node) {
 
   const after = state.nodes.find((n) => n.id === node.id);
   if (anchor && after) {
-    state.view.x = anchor.x - after.x * state.view.k;
-    state.view.y = anchor.y - after.y * state.view.k;
+    view.x = anchor.x - after.x * view.k;
+    view.y = anchor.y - after.y * view.k;
     applyTransform();
   }
 
@@ -350,70 +330,6 @@ function autoCollapse() {
   });
 }
 
-function setupPanZoom() {
-  let pending = false;   // button is down
-  let moved = false;     // moved far enough to count as a pan, not a click
-  let startX = 0;
-  let startY = 0;
-  let originX = 0;
-  let originY = 0;
-
-  // Deliberately no setPointerCapture: capturing on the SVG root retargets the
-  // follow-up `click` to the root, which would swallow every node click.
-  dom.map.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    pending = true;
-    moved = false;
-    startX = e.clientX;
-    startY = e.clientY;
-    originX = state.view.x;
-    originY = state.view.y;
-  });
-
-  window.addEventListener('pointermove', (e) => {
-    if (!pending) return;
-    const dx = e.clientX - startX;
-    const dy = e.clientY - startY;
-    if (!moved && Math.hypot(dx, dy) < 4) return;
-    if (!moved) {
-      moved = true;
-      dom.map.classList.add('dragging');
-    }
-    state.view.x = originX + dx;
-    state.view.y = originY + dy;
-    applyTransform();
-  });
-
-  const stop = () => {
-    if (!pending) return;
-    pending = false;
-    dom.map.classList.remove('dragging');
-    // Let the click that follows a pan fall through as "ignore me".
-    if (moved) setTimeout(() => { moved = false; }, 0);
-  };
-  window.addEventListener('pointerup', stop);
-  window.addEventListener('pointercancel', stop);
-  setupPanZoom.wasDrag = () => moved;
-
-  dom.canvas.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    const rect = dom.canvas.getBoundingClientRect();
-    if (e.ctrlKey || e.metaKey || Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-      zoomBy(Math.exp(-e.deltaY * 0.0016), e.clientX - rect.left, e.clientY - rect.top);
-    } else {
-      state.view.x -= e.deltaX;
-      applyTransform();
-    }
-  }, { passive: false });
-
-  dom.map.addEventListener('click', () => {
-    if (setupPanZoom.wasDrag?.()) return; // end of a pan, not a deselect
-    state.selectedId = null;
-    closeDrawer();
-    render();
-  });
-}
-
 /* ------------------------------------------------------------------- drawer */
 
 function openDrawer(node) {
@@ -429,10 +345,10 @@ function revealBehindDrawer(node) {
   const placed = state.nodes.find((n) => n.id === node.id) || node;
   const drawerWidth = dom.drawer.getBoundingClientRect().width;
   const canvasWidth = dom.canvas.getBoundingClientRect().width;
-  const rightEdge = state.view.x + (placed.x + NODE_W) * state.view.k;
+  const rightEdge = view.x + (placed.x + NODE_W) * view.k;
   const limit = canvasWidth - drawerWidth - 24;
   if (rightEdge > limit) {
-    state.view.x -= rightEdge - limit;
+    view.x -= rightEdge - limit;
     applyTransform();
   }
 }
@@ -656,7 +572,7 @@ async function loadModel({ fit = true } = {}) {
   autoCollapse();
   renderSidebar();
   rebuild({ keepView: !fit });
-  if (fit) fitToView();
+  if (fit && activeView === 'topology') fitToView();
 }
 
 async function startScan() {
@@ -734,48 +650,67 @@ function connectEvents() {
   source.addEventListener('error', () => { /* EventSource retries on its own */ });
 }
 
-function download(name, blob) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+function exportSvg() {
+  exportSvgFile(dom.map, contentBounds(), { filename: 'topology.svg' });
 }
 
-function exportSvg() {
-  const b = contentBounds();
-  const pad = 30;
-  const clone = dom.map.cloneNode(true);
-  // The page's font stack lives on <body>, which the standalone file has not.
-  clone.setAttribute('style', 'font-family: ui-sans-serif, -apple-system, system-ui, sans-serif');
-  clone.setAttribute('width', b.maxX - b.minX + pad * 2);
-  clone.setAttribute('height', b.maxY - b.minY + pad * 2);
-  clone.setAttribute('viewBox', `${b.minX - pad} ${b.minY - pad} ${b.maxX - b.minX + pad * 2} ${b.maxY - b.minY + pad * 2}`);
-  clone.querySelector('#viewport')?.removeAttribute('transform');
+/* -------------------------------------------------------------------- views */
 
-  // Inline the stylesheet so the file stands alone.
-  const style = document.createElementNS(SVG_NS, 'style');
-  style.textContent = [...document.styleSheets]
-    .flatMap((sheet) => {
-      try { return [...sheet.cssRules].map((r) => r.cssText); } catch { return []; }
-    })
-    .join('\n');
-  clone.insertBefore(style, clone.firstChild);
-  const bg = svg('rect', {
-    x: b.minX - pad, y: b.minY - pad,
-    width: b.maxX - b.minX + pad * 2, height: b.maxY - b.minY + pad * 2,
-    fill: '#0b0f14',
-  });
-  clone.insertBefore(bg, clone.querySelector('#viewport'));
+const views = {
+  topology: {
+    fit: fitToView,
+    show: canvas.fitIfNeeded,
+    closeDrawer,
+    focusSearch: () => dom.search.focus(),
+  },
+  traffic: null, // created lazily below, once the DOM it needs exists
+};
+let activeView = 'topology';
 
-  const xml = new XMLSerializer().serializeToString(clone);
-  download('topology.svg', new Blob([`<?xml version="1.0"?>\n${xml}`], { type: 'image/svg+xml' }));
+function showView(name) {
+  if (!views[name] || activeView === name) return;
+  const previous = activeView;
+  activeView = name;
+  for (const tab of document.querySelectorAll('.tab')) {
+    const on = tab.dataset.view === name;
+    tab.classList.toggle('active', on);
+    tab.setAttribute('aria-selected', String(on));
+  }
+  for (const section of document.querySelectorAll('.view')) {
+    section.hidden = section.dataset.view !== name;
+  }
+  for (const pane of document.querySelectorAll('.pane')) {
+    pane.hidden = pane.dataset.pane !== name;
+  }
+  views[previous]?.hide?.();
+  // A hidden view has no layout and so cannot measure itself; show() fits only
+  // when the frame is actually stale, leaving an existing pan/zoom alone.
+  views[name].show?.();
+}
+
+/** Jump from a traffic endpoint to the same device in the topology tree. */
+function showInTopology(ip) {
+  showView('topology');
+  if (!state.model) return;
+  state.query = '';
+  dom.search.value = '';
+  state.collapsed.clear(); // the device may sit inside a collapsed group
+  state.selectedId = `dev:${ip}`; // topology.js keys device nodes this way
+  rebuild({ keepView: false });
+  const node = state.nodes.find((candidate) => candidate.id === state.selectedId);
+  if (node) {
+    fitToView();
+    openDrawer(node);
+  }
 }
 
 /* ------------------------------------------------------------------ wire up */
 
 function bind() {
+  for (const tab of document.querySelectorAll('.tab')) {
+    tab.addEventListener('click', () => showView(tab.dataset.view));
+  }
+
   dom.scan.addEventListener('click', startScan);
   dom['empty-scan'].addEventListener('click', startScan);
   dom.fit.addEventListener('click', fitToView);
@@ -818,21 +753,27 @@ function bind() {
       if (e.key === 'Escape') e.target.blur();
       return;
     }
-    if (e.key === '/') { e.preventDefault(); dom.search.focus(); }
-    else if (e.key === 'Escape') closeDrawer();
-    else if (e.key === 'f') fitToView();
-    else if (e.key === 'e') setAllCollapsed(false);
-    else if (e.key === 'c') setAllCollapsed(true);
+    const current = views[activeView];
+    if (e.key === '/') { e.preventDefault(); current.focusSearch?.(); }
+    else if (e.key === 'Escape') current.closeDrawer?.();
+    else if (e.key === 'f') current.fit?.();
+    else if (e.key === 't') showView(activeView === 'topology' ? 'traffic' : 'topology');
+    else if (activeView === 'topology' && e.key === 'e') setAllCollapsed(false);
+    else if (activeView === 'topology' && e.key === 'c') setAllCollapsed(true);
   });
 
   let resizeTimer = null;
   window.addEventListener('resize', () => {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(fitToView, 160);
+    resizeTimer = setTimeout(() => views[activeView]?.fit?.(), 160);
   });
 }
 
-setupPanZoom();
+views.traffic = createTrafficView({
+  getModel: () => state.model,
+  onShowInTopology: showInTopology,
+});
+
 bind();
 connectEvents();
 loadModel().catch(() => { dom.empty.hidden = false; });
