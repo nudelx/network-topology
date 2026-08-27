@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { scanNetwork } from "./scan/index.js";
+import { createTrafficMonitor } from "./traffic/index.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
@@ -22,15 +23,20 @@ const MIME = {
 
 // `src/lib` modules that the browser imports directly, so tree-building logic
 // lives in exactly one place.
-const SHARED = new Set(["topology.js", "classify.js"]);
+const SHARED = new Set(["topology.js", "classify.js", "flows.js", "mac.js"]);
 
-export function createServer({ scanOptions = {} } = {}) {
+export function createServer({ scanOptions = {}, trafficOptions = {} } = {}) {
   const state = {
     model: null,
     scanning: false,
     lastError: null,
     events: [], // replayed to clients that connect mid-scan
     clients: new Set(),
+    // Traffic gets its own stream: snapshots arrive every second and are large,
+    // so they must not crowd out the scan events a late client replays.
+    trafficClients: new Set(),
+    trafficSnapshot: null,
+    trafficError: null,
   };
 
   const broadcast = (event) => {
@@ -46,13 +52,29 @@ export function createServer({ scanOptions = {} } = {}) {
     }
   };
 
+  const broadcastTraffic = (event) => {
+    if (event.type === "traffic-snapshot" || event.snapshot) {
+      state.trafficSnapshot = event.snapshot || state.trafficSnapshot;
+    }
+    if (event.type === "traffic-error") state.trafficError = event.message;
+    const frame = `data: ${JSON.stringify(event)}\n\n`;
+    for (const res of state.trafficClients) {
+      try {
+        res.write(frame);
+      } catch {
+        state.trafficClients.delete(res);
+      }
+    }
+  };
+
+  const traffic = createTrafficMonitor({ onEvent: broadcastTraffic });
+
   async function runScan(options = {}) {
     if (state.scanning)
       return { started: false, reason: "a scan is already running" };
     state.scanning = true;
     state.lastError = null;
     state.events = [];
-    console.log("options", { options });
 
     const merged = { ...scanOptions, ...options };
     broadcast({ type: "started", at: Date.now(), options: summarize(merged) });
@@ -117,31 +139,63 @@ export function createServer({ scanOptions = {} } = {}) {
         });
       }
 
-      if (route === "/api/events") {
-        res.writeHead(200, {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache, no-transform",
-          Connection: "keep-alive",
-          "X-Accel-Buffering": "no",
+      if (route === "/api/traffic") {
+        return json(res, 200, {
+          running: traffic.running,
+          vantage: traffic.vantage,
+          warnings: traffic.warnings,
+          lastError: state.trafficError,
+          snapshot: traffic.running ? traffic.snapshot() : state.trafficSnapshot,
         });
-        res.write(": connected\n\n");
-        for (const event of state.events)
-          res.write(`data: ${JSON.stringify(event)}\n\n`);
-        if (!state.scanning)
-          res.write(
-            `data: ${JSON.stringify({ type: "idle", at: Date.now() })}\n\n`,
-          );
-        state.clients.add(res);
-        const ping = setInterval(() => {
-          try {
-            res.write(": ping\n\n");
-          } catch {
-            /* closed */
+      }
+
+      if (route === "/api/traffic/start" && req.method === "POST") {
+        const body = await readJson(req);
+        const options = cleanTrafficOptions(body);
+        const merged = { ...trafficOptions, ...options };
+        merged.filter = combineFilters(trafficOptions.filter, options.filter);
+        state.trafficError = null;
+        const result = await traffic.start(merged);
+        return json(res, result.started ? 202 : 409, {
+          ...result,
+          running: traffic.running,
+          warnings: traffic.warnings,
+        });
+      }
+
+      if (route === "/api/traffic/stop" && req.method === "POST") {
+        const result = traffic.stop({ reason: "stopped from the web UI" });
+        return json(res, 200, { ...result, running: traffic.running });
+      }
+
+      if (route === "/api/traffic/events") {
+        openStream(res, req, state.trafficClients, () => {
+          const frames = [];
+          if (traffic.vantage) {
+            frames.push({
+              type: "traffic-started",
+              at: Date.now(),
+              vantage: traffic.vantage,
+              replay: true,
+            });
           }
-        }, 20000);
-        req.on("close", () => {
-          clearInterval(ping);
-          state.clients.delete(res);
+          const snapshot = traffic.running ? traffic.snapshot() : state.trafficSnapshot;
+          if (snapshot) {
+            frames.push({ type: "traffic-snapshot", at: Date.now(), snapshot, replay: true });
+          }
+          if (!traffic.running) {
+            frames.push({ type: "traffic-idle", at: Date.now() });
+          }
+          return frames;
+        });
+        return undefined;
+      }
+
+      if (route === "/api/events") {
+        openStream(res, req, state.clients, () => {
+          const frames = [...state.events];
+          if (!state.scanning) frames.push({ type: "idle", at: Date.now() });
+          return frames;
         });
         return undefined;
       }
@@ -166,7 +220,7 @@ export function createServer({ scanOptions = {} } = {}) {
     }
   });
 
-  return { server, runScan, state };
+  return { server, runScan, traffic, state };
 }
 
 async function readCached() {
@@ -175,6 +229,61 @@ async function readCached() {
   } catch {
     return null;
   }
+}
+
+/** SSE boilerplate: headers, a replay burst, keep-alive pings, cleanup. */
+function openStream(res, req, clients, replay) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.write(": connected\n\n");
+  for (const event of replay() || []) {
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  }
+  clients.add(res);
+  const ping = setInterval(() => {
+    try {
+      res.write(": ping\n\n");
+    } catch {
+      /* closed */
+    }
+  }, 20000);
+  req.on("close", () => {
+    clearInterval(ping);
+    clients.delete(res);
+  });
+}
+
+/** BPF expressions are ANDed, so a caller filter cannot widen the server's. */
+function combineFilters(...filters) {
+  const parts = filters.filter(Boolean).map((f) => `(${f})`);
+  return parts.length ? parts.join(" and ") : null;
+}
+
+function cleanTrafficOptions(body) {
+  const out = {};
+  if (Number.isFinite(body?.seconds)) {
+    out.seconds = Math.max(0, Math.min(3600, Math.floor(body.seconds)));
+  }
+  if (typeof body?.sudo === "boolean") out.sudo = body.sudo;
+  if (Number.isFinite(body?.windowSeconds)) {
+    out.windowSeconds = Math.max(10, Math.min(600, Math.floor(body.windowSeconds)));
+  }
+  if (Array.isArray(body?.ifaces)) {
+    const safe = body.ifaces
+      .filter((name) => typeof name === "string" && /^[a-zA-Z0-9._-]{1,24}$/.test(name))
+      .slice(0, 8);
+    if (safe.length) out.ifaces = safe;
+  }
+  // A BPF expression reaches tcpdump's own parser, never a shell, but it is
+  // still user input on a command line: allow only expression characters.
+  if (typeof body?.filter === "string" && /^[\w\s.:/()\[\]&|!<>=-]{1,200}$/.test(body.filter)) {
+    out.filter = body.filter.trim() || null;
+  }
+  return out;
 }
 
 function cleanOptions(body) {

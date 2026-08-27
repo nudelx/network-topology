@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { normalizeMac, isRandomizedMac } from './mac.js';
 
 /**
  * MAC -> vendor lookup. Prefers nmap's `nmap-mac-prefixes` (~50k entries) when
@@ -83,32 +84,6 @@ function loadTable() {
   return table;
 }
 
-export function normalizeMac(mac) {
-  if (!mac) return null;
-  const raw = String(mac).trim();
-  // `arp` on macOS prints unpadded octets, e.g. 4e:86:5d:3:a2:e
-  if (raw.includes(':') || raw.includes('-')) {
-    const parts = raw.split(/[:-]/);
-    if (parts.length === 6 && parts.every((p) => /^[0-9a-fA-F]{1,2}$/.test(p))) {
-      return parts.map((p) => p.padStart(2, '0').toUpperCase()).join(':');
-    }
-  }
-  const hex = raw.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
-  if (hex.length !== 12) return null;
-  return hex.match(/.{2}/g).join(':');
-}
-
-/**
- * A locally-administered / randomized MAC (bit 1 of the first octet). Modern
- * phones and laptops rotate these per network, so the vendor is unknowable.
- */
-export function isRandomizedMac(mac) {
-  const norm = normalizeMac(mac);
-  if (!norm) return false;
-  const first = parseInt(norm.slice(0, 2), 16);
-  return (first & 0x02) === 0x02;
-}
-
 export function vendorOf(mac) {
   const norm = normalizeMac(mac);
   if (!norm) return null;
@@ -121,3 +96,7 @@ export function ouiSource() {
   loadTable();
   return { source, entries: table.size };
 }
+
+// Re-exported so callers that only need MAC formatting can keep importing from
+// here; the implementations live in mac.js, which the browser can also load.
+export { normalizeMac, isRandomizedMac } from './mac.js';
