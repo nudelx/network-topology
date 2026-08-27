@@ -62,7 +62,7 @@
       </div>
 
       <!-- ------------------------------------------------- traffic sidebar -->
-      <div class="pane" data-pane="traffic" hidden>
+      <div class="pane" data-pane="traffic heatmap" hidden>
         <section class="block">
           <h2>Capture</h2>
           <label class="field">
@@ -99,6 +99,14 @@
           <div class="vantage" id="t-vantage"></div>
         </section>
 
+        <section class="block" id="t-notes-block" hidden>
+          <h2>Notes</h2>
+          <ul class="warnings" id="t-notes"></ul>
+        </section>
+      </div>
+
+      <!-- --------------------------------------- traffic-map-only sidebar -->
+      <div class="pane" data-pane="traffic" hidden>
         <section class="block">
           <h2>Traffic types <button id="t-clear-class" class="link" hidden>clear filter</button></h2>
           <ul class="legend" id="t-classes"></ul>
@@ -108,10 +116,27 @@
           <h2>Top talkers</h2>
           <ul class="talkers" id="t-talkers"></ul>
         </section>
+      </div>
 
-        <section class="block" id="t-notes-block" hidden>
-          <h2>Notes</h2>
-          <ul class="warnings" id="t-notes"></ul>
+      <!-- ------------------------------------------- heatmap-only sidebar -->
+      <div class="pane" data-pane="heatmap" hidden>
+        <section class="block">
+          <h2>Ranked totals</h2>
+          <div class="stats" id="h-summary"></div>
+        </section>
+
+        <section class="block">
+          <h2>Intensity</h2>
+          <div class="legend-scale">
+            <span id="h-legend-min">0</span>
+            <div class="legend-bar" id="h-legend-bar"></div>
+            <span id="h-legend-max">—</span>
+          </div>
+          <p class="vantage-note">
+            Each cell is one second. Shading is square-rooted, because byte counts
+            are heavy-tailed and a linear scale leaves all but the busiest second
+            looking idle.
+          </p>
         </section>
       </div>
 
@@ -127,6 +152,9 @@
         </button>
         <button class="tab" data-view="traffic" role="tab" aria-selected="false">
           <span aria-hidden="true">📈</span> Traffic
+        </button>
+        <button class="tab" data-view="heatmap" role="tab" aria-selected="false">
+          <span aria-hidden="true">🔥</span> Heatmap
         </button>
       </nav>
 
@@ -246,8 +274,67 @@
           </aside>
         </div>
       </section>
+      <!-- ---------------------------------------------------- heatmap view -->
+      <section class="view" data-view="heatmap" hidden>
+        <div class="toolbar">
+          <div class="search">
+            <span aria-hidden="true">⌕</span>
+            <input id="h-search" type="search" placeholder="Search name, IP, MAC, vendor…  (/)" spellcheck="false" />
+          </div>
+          <label class="inline-field">
+            <span>Rank by</span>
+            <select id="h-metric">
+              <option value="total" selected>total</option>
+              <option value="sent">sent — top senders</option>
+              <option value="received">received — top consumers</option>
+            </select>
+          </label>
+          <label class="inline-field">
+            <span>Rows</span>
+            <select id="h-rows">
+              <option value="10">10</option>
+              <option value="20" selected>20</option>
+              <option value="40">40</option>
+              <option value="80">80</option>
+            </select>
+          </label>
+          <label class="inline-field">
+            <span>Scale</span>
+            <select id="h-scale">
+              <option value="global" selected>shared — rows compare</option>
+              <option value="row">per row — shows shape</option>
+            </select>
+          </label>
+          <div class="spacer"></div>
+          <div class="btn-group">
+            <button id="h-export-csv" title="Download the heatmap as CSV">CSV</button>
+          </div>
+        </div>
+
+        <div class="heatmap-wrap" id="h-canvas">
+          <div class="heatmap" id="h-grid"></div>
+
+          <div class="empty" id="h-empty">
+            <div class="empty-card">
+              <h3 id="h-empty-title">No traffic captured yet</h3>
+              <p id="h-empty-blurb">
+                Start a capture from the sidebar to see which devices send and receive
+                the most, and when.
+              </p>
+              <button id="h-empty-clear" hidden>Clear search</button>
+            </div>
+          </div>
+
+          <aside class="drawer" id="h-drawer" hidden>
+            <button class="drawer-close" id="h-drawer-close" title="Close (Esc)">×</button>
+            <div id="h-drawer-body"></div>
+          </aside>
+        </div>
+      </section>
     </main>
   </div>
+
+  <div class="hm-tooltip" id="h-tooltip" hidden></div>
 
   <script type="module" src="/app.js"></script>
 </body>

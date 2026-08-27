@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { scanNetwork } from './scan/index.js';
 import { captureTraffic } from './traffic/index.js';
 import { buildTree, treeToText, countDevices } from './lib/topology.js';
-import { buildFlowGraph, flowsToText, formatWeight, formatRate, formatCount } from './lib/flows.js';
+import { buildFlowGraph, flowsToText, endpointsToText, formatWeight, formatRate, formatCount } from './lib/flows.js';
 import { createServer } from './server.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -54,7 +54,10 @@ ${C.bold('Traffic options')}
   --filter <bpf>       Extra BPF expression, e.g. 'not port 22'.
   --sudo               Run tcpdump through sudo -n. Without it there is no
                        packet capture, only this machine's open connections.
-  --limit <n>          Rows of flow table to print (default 25).
+  --limit <n>          Rows of table to print (default 25).
+  --rank <metric>      total | sent | received  — which column ranks the
+                       top-talkers table (default total). 'sent' gives top
+                       senders, 'received' gives top consumers.
   --json               Print the flow snapshot instead of the table.
 
 ${C.bold('Serve options')}
@@ -89,6 +92,7 @@ function parseArgs(argv) {
       case '--iface': case '-i': out.ifaces.push(next()); break;
       case '--filter': out.filter = next(); break;
       case '--limit': out.limit = Number(next()); break;
+      case '--rank': out.rank = next(); break;
       case '--port': out.port = Number(next()); break;
       case '--host': out.hostAddr = next(); break;
       case '--scan': out.scan = true; break;
@@ -213,8 +217,15 @@ async function cmdTraffic(args) {
   const unit = graph.unit;
   const seenSeconds = Math.max(1, (graph.stats.elapsedMs || 0) / 1000);
 
+  const limit = Number.isFinite(args.limit) ? args.limit : 25;
+  const rank = ['total', 'sent', 'received'].includes(args.rank) ? args.rank : 'total';
+
   console.log('');
-  console.log(flowsToText(graph, { limit: Number.isFinite(args.limit) ? args.limit : 25 }).join('\n'));
+  console.log(C.bold(`Top talkers by ${rank}`));
+  console.log(endpointsToText(graph, { limit: Math.min(limit, 12), metric: rank }).join('\n'));
+  console.log('');
+  console.log(C.bold('Conversations'));
+  console.log(flowsToText(graph, { limit }).join('\n'));
   console.log('');
   console.log(
     `${C.bold('Total')}    ${formatWeight(graph.stats.bytes, unit)}` +

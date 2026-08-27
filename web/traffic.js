@@ -27,7 +27,12 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const MAX_NODES = 200;   // beyond this the O(n²) repulsion and the map both suffer
 const LABEL_LIMIT = 28;  // nodes that always carry a visible label
 
-export function createTrafficView({ onShowInTopology = () => {}, getModel = () => null } = {}) {
+export function createTrafficView({
+  store,
+  controls,
+  onShowInTopology = () => {},
+  getModel = () => null,
+} = {}) {
   const $ = (id) => document.getElementById(id);
   const dom = {};
   for (const id of [
@@ -36,27 +41,23 @@ export function createTrafficView({ onShowInTopology = () => {}, getModel = () =
     't-export-svg', 't-export-json', 't-window', 't-sudo', 't-iface', 't-start',
     't-status', 't-stats', 't-vantage', 't-classes', 't-clear-class', 't-talkers',
     't-notes', 't-notes-block', 't-drawer', 't-drawer-body', 't-drawer-close',
-    't-progress', 't-bar-fill', 't-empty-progress', 't-empty-bar', 't-empty-status',
-    't-empty-detail', 't-empty-title', 't-empty-blurb', 't-empty-fine', 't-empty-clear',
+    't-empty-progress', 't-empty-bar', 't-empty-status', 't-empty-detail',
+    't-empty-title', 't-empty-blurb', 't-empty-fine', 't-empty-clear',
   ]) dom[id] = $(id);
 
+  // Capture state — the snapshot, whether one is running, the window, the
+  // warnings — lives in the store, shared with the heatmap: they are two
+  // readings of one capture. Only what is particular to drawing this map is
+  // local to the view.
+  const shared = store.state;
   const state = {
-    snapshot: null,
     graph: { nodes: [], edges: [], unit: 'bytes' },
-    running: false,
-    paused: false,
     query: '',
     groupInternet: true,
     classFilter: new Set(),
     selected: null,  // {type: 'node'|'edge', id}
     hoverId: null,
     visible: false,
-    warnings: [],
-    status: 'idle',
-    pending: false,        // a start/stop request is in flight
-    startedAt: null,       // wall clock the running capture began
-    captureSeconds: 0,     // requested window; 0 means "until stopped"
-    everCaptured: false,   // a capture has finished, so "nothing seen" is news
     ticker: null,
   };
 
@@ -231,7 +232,7 @@ export function createTrafficView({ onShowInTopology = () => {}, getModel = () =
 
   function rebuild({ fit = false } = {}) {
     const graph = buildFlowGraph({
-      snapshot: state.snapshot,
+      snapshot: shared.snapshot,
       model: getModel(),
       options: {
         groupInternet: state.groupInternet,
@@ -321,9 +322,9 @@ export function createTrafficView({ onShowInTopology = () => {}, getModel = () =
    * cause — so the filtered case gets its own message and a way out.
    */
   function renderEmptyState() {
-    const captured = (state.snapshot?.endpoints || []).length > 0;
+    const captured = (shared.snapshot?.endpoints || []).length > 0;
     const filtering = Boolean(state.query.trim()) || state.classFilter.size > 0;
-    const active = state.running || state.pending;
+    const active = shared.running || shared.pending;
     const shown = state.graph.nodes.length;
 
     dom['t-empty-clear'].hidden = true;
@@ -354,7 +355,7 @@ export function createTrafficView({ onShowInTopology = () => {}, getModel = () =
         'Devices appear here as soon as they send something this capture point can see.';
       dom['t-empty-progress'].hidden = false;
       dom['t-empty-fine'].hidden = true;
-    } else if (state.everCaptured) {
+    } else if (shared.everCaptured) {
       dom['t-empty-title'].textContent = 'No traffic seen';
       dom['t-empty-blurb'].textContent =
         'Nothing crossed this capture point during the window. On a switched network that is '
@@ -787,7 +788,7 @@ export function createTrafficView({ onShowInTopology = () => {}, getModel = () =
       dom['t-talkers'].append(row);
     }
 
-    const notes = [...state.warnings];
+    const notes = [...shared.warnings];
     if (graph.hiddenNodes) {
       notes.push(`Showing the ${MAX_NODES} busiest endpoints; ${graph.hiddenNodes} quieter ones are not drawn.`);
     }
@@ -809,28 +810,23 @@ export function createTrafficView({ onShowInTopology = () => {}, getModel = () =
    * handler with the sidebar's, so a second click on "Start capture" would
    * otherwise stop the capture that first click had just started.
    */
-  function setStatus(text, busy = state.running) {
-    state.status = text;
-    const active = busy || state.pending;
-
-    dom['t-status'].textContent = text;
-
-    // The sidebar button stays usable so a running capture can be stopped, but
-    // not while a request is unresolved.
-    dom['t-start'].textContent = busy ? 'Stop capture' : 'Start capture';
-    dom['t-start'].classList.toggle('primary', !busy);
-    dom['t-start'].disabled = state.pending;
+  /**
+   * Only this view's own chrome. The sidebar's status line, start button and
+   * progress bar are shared with the heatmap and are rendered by
+   * capture-controls.js, which stays subscribed whichever tab is showing.
+   */
+  function setStatus(text, busy = shared.running) {
+    const active = busy || shared.pending;
 
     dom['t-empty-start'].disabled = active;
     dom['t-empty-start'].textContent = active ? 'Capturing…' : 'Start capture';
     dom['t-empty-status'].textContent = text;
-    dom['t-progress'].hidden = !active;
 
-    dom['t-live'].textContent = state.paused ? 'Resume' : 'Pause';
-    dom['t-live'].disabled = !state.running;
+    dom['t-live'].textContent = shared.paused ? 'Resume' : 'Pause';
+    dom['t-live'].disabled = !shared.running;
 
     renderEmptyState();
-    if (active) startTicker();
+    if (active && state.visible) startTicker();
     else stopTicker();
   }
 
@@ -845,205 +841,40 @@ export function createTrafficView({ onShowInTopology = () => {}, getModel = () =
   function stopTicker() {
     if (state.ticker !== null) clearInterval(state.ticker);
     state.ticker = null;
-    for (const bar of [dom['t-bar-fill'], dom['t-empty-bar']]) {
-      bar.classList.remove('indeterminate');
-      bar.style.width = '0%';
-    }
+    dom['t-empty-bar'].classList.remove('indeterminate');
+    dom['t-empty-bar'].style.width = '0%';
     dom['t-empty-detail'].textContent = '';
   }
 
   function renderProgress() {
-    const total = state.captureSeconds;
-    const elapsed = state.startedAt ? (Date.now() - state.startedAt) / 1000 : 0;
-    // A fixed window has a real end to count towards; "until stopped" does not,
-    // so the bar cycles rather than claiming a progress it cannot know.
-    const indeterminate = !total || !state.startedAt;
-    const percent = indeterminate ? 100 : Math.min(100, (elapsed / total) * 100);
-
-    for (const bar of [dom['t-bar-fill'], dom['t-empty-bar']]) {
-      bar.classList.toggle('indeterminate', indeterminate);
-      bar.style.width = `${percent.toFixed(1)}%`;
-    }
-    dom['t-empty-detail'].textContent = progressDetail(elapsed, total);
-  }
-
-  function progressDetail(elapsed, total) {
-    const totals = state.snapshot?.totals;
-    const unit = state.graph.unit;
-    const bits = [];
-    if (totals) {
-      bits.push(unit === 'bytes'
-        ? `${formatWeight(totals.bytes, unit)} · ${formatCount(totals.packets)} packets`
-        : `${formatCount(totals.bytes)} connections`);
-      bits.push(`${formatCount(totals.flows)} conversation${totals.flows === 1 ? '' : 's'}`);
-    }
-    if (state.startedAt) {
-      bits.push(total ? `${clock(elapsed)} of ${clock(total)}` : `${clock(elapsed)} elapsed`);
-    }
-    return bits.join('   ');
+    const total = shared.captureSeconds;
+    const elapsed = shared.startedAt ? (Date.now() - shared.startedAt) / 1000 : 0;
+    const indeterminate = !total || !shared.startedAt;
+    const bar = dom['t-empty-bar'];
+    bar.classList.toggle('indeterminate', indeterminate);
+    bar.style.width = indeterminate
+      ? '100%'
+      : `${Math.min(100, (elapsed / total) * 100).toFixed(1)}%`;
+    dom['t-empty-detail'].textContent = controls.progressDetail(state.graph.unit);
   }
 
   /* ------------------------------------------------------------- data i/o */
 
   /**
-   * Applies a snapshot unless a newer one already landed. The initial fetch and
-   * the event stream race on every tab open, and the fetch losing that race
-   * used to blank a live map back to the empty state.
+   * The store owns the capture; this view only redraws when it changes. A
+   * snapshot arriving while the tab is hidden is kept but not drawn, since
+   * rebuild() would be laying out inside a container with no dimensions.
    */
-  function applySnapshot(snapshot, { fit = false } = {}) {
-    const at = snapshot?.window?.now || 0;
-    if (!snapshot || at < state.snapshotAt) return false;
-    state.snapshot = snapshot;
-    state.snapshotAt = at;
-    state.warnings = snapshot.vantage?.warnings || state.warnings;
-    if (snapshot.vantage?.startedAt) state.startedAt = snapshot.vantage.startedAt;
-    if (Number.isFinite(snapshot.vantage?.seconds)) state.captureSeconds = snapshot.vantage.seconds;
-    if (state.visible) rebuild({ fit });
-    return true;
-  }
-
-  async function loadSnapshot({ fit = true } = {}) {
-    const res = await fetch('/api/traffic');
-    if (!res.ok) return;
-    const payload = await res.json();
-    if (payload.snapshot) {
-      state.running = Boolean(payload.running);
-      state.warnings = payload.warnings || [];
-      if (payload.running) state.everCaptured = false;
-      if (!applySnapshot(payload.snapshot, { fit })) return;
-    } else if (state.snapshot) {
-      return; // the stream got there first; leave the live map alone
-    } else {
-      state.running = Boolean(payload.running);
-      state.warnings = payload.warnings || [];
-      renderSidebar();
-      renderEmptyState();
-    }
-    setStatus(state.running ? 'capturing…' : payload.snapshot ? 'capture stopped' : 'idle');
-  }
-
-  async function toggleCapture() {
-    if (state.pending) return; // a start or stop is already in flight
-    if (state.running) return stopCapture();
-    return startCapture();
-  }
-
-  async function startCapture() {
-    const ifaceRaw = dom['t-iface'].value.trim();
-    const seconds = Number(dom['t-window'].value);
-    const payload = { seconds, sudo: dom['t-sudo'].checked };
-    if (ifaceRaw) payload.ifaces = ifaceRaw.split(/[\s,]+/).filter(Boolean);
-
-    state.pending = true;
-    state.captureSeconds = Number.isFinite(seconds) ? seconds : 0;
-    state.startedAt = Date.now(); // provisional until the server reports its own
-    setStatus('starting…', true);
-
-    let started = false;
-    let message = 'capture could not start';
-    try {
-      const res = await fetch('/api/traffic/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const info = await res.json().catch(() => ({}));
-      started = res.ok;
-      if (started) {
-        // The server's own figures win: it may have clamped the window.
-        if (info.vantage?.startedAt) state.startedAt = info.vantage.startedAt;
-        if (Number.isFinite(info.vantage?.seconds)) state.captureSeconds = info.vantage.seconds;
-        state.running = true;
-        message = info.vantage?.method === 'tcpdump'
-          ? `capturing on ${(info.vantage.interfaces || []).join(', ') || 'no interface'}…`
-          : 'sampling open connections…';
-      } else {
-        message = info.reason || message;
-      }
-    } catch {
-      /* network error; the default message stands */
-    }
-
-    // Cleared before the final render, or the controls would stay disabled.
-    state.pending = false;
-    if (!started) state.startedAt = null;
-    setStatus(message, started);
-  }
-
-  async function stopCapture() {
-    state.pending = true;
-    setStatus('stopping…', true);
-    try {
-      await fetch('/api/traffic/stop', { method: 'POST' });
-    } catch {
-      /* the stopped event or the next poll will correct the display */
-    }
-    state.pending = false;
-    state.running = false;
-    state.everCaptured = true;
-    state.startedAt = null;
-    setStatus('capture stopped', false);
-  }
-
-  function connectEvents() {
-    const source = new EventSource('/api/traffic/events');
-    source.addEventListener('message', (event) => {
-      let data;
-      try {
-        data = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-
-      switch (data.type) {
-        case 'traffic-started':
-          state.running = true;
-          state.warnings = data.vantage?.warnings || state.warnings;
-          // A client that connects mid-capture learns the window from the
-          // event, so its progress bar counts towards the same end.
-          if (data.vantage?.startedAt) state.startedAt = data.vantage.startedAt;
-          if (Number.isFinite(data.seconds)) state.captureSeconds = data.seconds;
-          else if (Number.isFinite(data.vantage?.seconds)) state.captureSeconds = data.vantage.seconds;
-          setStatus(data.message || 'capturing…', true);
-          break;
-        case 'traffic-phase':
-          setStatus(data.message || 'capturing…', true);
-          break;
-        case 'traffic-warning':
-          if (!state.warnings.includes(data.message)) state.warnings.push(data.message);
-          renderSidebar();
-          break;
-        case 'traffic-snapshot': {
-          if (state.paused) break;
-          const first = !state.snapshot;
-          state.running = data.snapshot?.vantage?.running ?? state.running;
-          applySnapshot(data.snapshot, { fit: first });
-          setStatus(state.running ? 'capturing…' : 'capture stopped');
-          break;
-        }
-        case 'traffic-stopped':
-          state.running = false;
-          state.everCaptured = true;
-          state.startedAt = null;
-          if (!state.paused) applySnapshot(data.snapshot);
-          setStatus(data.message || 'capture stopped', false);
-          break;
-        case 'traffic-idle':
-          state.running = false;
-          state.startedAt = null;
-          setStatus(state.snapshot ? 'capture stopped' : 'idle', false);
-          break;
-        default:
-          break;
-      }
-    });
-    source.addEventListener('error', () => { /* EventSource retries on its own */ });
+  function onStoreChange() {
+    if (!state.visible) return;
+    const first = !state.graph.nodes.length;
+    rebuild({ fit: first });
+    setStatus(shared.status, shared.running);
   }
 
   /* ------------------------------------------------------------- wire up */
 
-  dom['t-start'].addEventListener('click', toggleCapture);
-  dom['t-empty-start'].addEventListener('click', toggleCapture);
+  dom['t-empty-start'].addEventListener('click', () => controls.toggle());
   dom['t-drawer-close'].addEventListener('click', () => {
     state.selected = null;
     closeDrawer();
@@ -1052,10 +883,7 @@ export function createTrafficView({ onShowInTopology = () => {}, getModel = () =
   dom['t-fit'].addEventListener('click', () => canvas.fitToView());
   dom['t-zoom-in'].addEventListener('click', () => canvas.zoomBy(1.25));
   dom['t-zoom-out'].addEventListener('click', () => canvas.zoomBy(0.8));
-  dom['t-live'].addEventListener('click', () => {
-    state.paused = !state.paused;
-    setStatus(state.paused ? 'paused — the map is frozen' : 'capturing…');
-  });
+  dom['t-live'].addEventListener('click', () => store.setPaused(!shared.paused));
   dom['t-grouping'].addEventListener('change', () => {
     state.groupInternet = dom['t-grouping'].value === 'grouped';
     rebuild({ fit: true });
@@ -1075,8 +903,8 @@ export function createTrafficView({ onShowInTopology = () => {}, getModel = () =
   });
   dom['t-empty-clear'].addEventListener('click', clearFilters);
   dom['t-export-json'].addEventListener('click', () => {
-    if (state.snapshot) {
-      download('traffic.json', new Blob([JSON.stringify(state.snapshot, null, 2)], { type: 'application/json' }));
+    if (shared.snapshot) {
+      download('traffic.json', new Blob([JSON.stringify(shared.snapshot, null, 2)], { type: 'application/json' }));
     }
   });
   dom['t-export-svg'].addEventListener('click', () => {
@@ -1092,13 +920,13 @@ export function createTrafficView({ onShowInTopology = () => {}, getModel = () =
     }, 160);
   });
 
-  setStatus('idle', false);
-  connectEvents();
+  setStatus(shared.status, shared.running);
+  store.subscribe(onStoreChange);
 
   return {
     show() {
       state.visible = true;
-      if (!state.snapshot) loadSnapshot({ fit: true }).catch(() => {});
+      if (!shared.snapshot) store.load().catch(() => {});
       else {
         // Snapshots kept arriving while the tab was hidden, but rebuild() skips
         // an invisible view, so the map is redrawn on the way in. The frame is
@@ -1113,7 +941,7 @@ export function createTrafficView({ onShowInTopology = () => {}, getModel = () =
       stopTicking();
     },
     isRunning() {
-      return state.running;
+      return shared.running;
     },
     focusSearch() {
       dom['t-search'].focus();
@@ -1125,6 +953,11 @@ export function createTrafficView({ onShowInTopology = () => {}, getModel = () =
       state.selected = null;
       closeDrawer();
       applyFocus();
+    },
+    /** Focus a node by id, for a cross-link from another view. */
+    select(nodeId) {
+      if (!state.graph.nodes.some((node) => node.id === nodeId)) return;
+      select({ type: 'node', id: nodeId });
     },
   };
 }
@@ -1138,12 +971,6 @@ function el(tag, opts = {}, children = []) {
   for (const [k, v] of Object.entries(opts.attrs || {})) node.setAttribute(k, String(v));
   for (const child of children) if (child) node.append(child);
   return node;
-}
-
-/** Seconds -> m:ss, for the capture countdown. */
-function clock(seconds) {
-  const whole = Math.max(0, Math.round(seconds));
-  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`;
 }
 
 function truncate(str, max) {

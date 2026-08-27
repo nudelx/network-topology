@@ -11,6 +11,8 @@ Scan the local network and render it as an interactive topology tree in the brow
 - **Traffic**, on a second tab: who is actually talking to whom, how much, and
   about what — from a live `tcpdump` capture, or from this machine's open
   sockets when there is no root.
+- **A heatmap**, on a third: the top senders and top consumers, second by
+  second, so a burst and a steady trickle of the same size look different.
 - **Zero runtime dependencies.** Node 18+ and nothing from npm.
 
 ## Quick start
@@ -29,8 +31,9 @@ node src/cli.js serve      # explore the saved scan in the browser
 `npm start`, `npm run scan`, `npm run serve` and `npm run traffic` are the
 same commands.
 
-The map has two tabs: **Topology**, the tree of what is on the network, and
-**Traffic**, a live graph of what is moving across it. `t` switches between them.
+The map has three tabs: **Topology**, the tree of what is on the network,
+**Traffic**, a live graph of what is moving across it, and **Heatmap**, the same
+capture ranked by volume over time. `t` cycles them.
 
 ```bash
 node src/cli.js traffic --seconds 30 --sudo    # same data, in the terminal
@@ -89,7 +92,8 @@ topology                     Same as: topology serve --scan
 | `--iface <name>` | Interface to capture on, repeatable. Default: every local non-tunnel interface. |
 | `--filter <bpf>` | Extra BPF expression, e.g. `'not port 22'`. |
 | `--sudo` | Run `tcpdump` through `sudo -n`. Without it there is no capture. |
-| `--limit <n>` | Rows of flow table to print (default 25). |
+| `--limit <n>` | Rows of table to print (default 25). |
+| `--rank <metric>` | `total` \| `sent` \| `received` — ranks the top-talkers table. `sent` gives top senders, `received` top consumers. |
 | `--json` | Print the flow snapshot instead of the table. |
 
 The table names devices from the last saved scan, so run `topology scan` first
@@ -99,7 +103,7 @@ if you would rather read hostnames than addresses.
 
 ```
 ┌───────────────┬──────────────────────────────────────────────────┐
-│               │  Topology  │  Traffic                            │
+│               │  Topology  │  Traffic  │  Heatmap                │
 │ scan controls ├──────────────────────────────────────────────────┤
 │ summary       │ search · group · expand/collapse · zoom · export │
 │ type legend   ├──────────────────────────────────────────────────┤
@@ -109,14 +113,16 @@ if you would rather read hostnames than addresses.
 ```
 
 The sidebar swaps with the tab: scan controls alongside the tree, capture
-controls alongside the traffic graph.
+controls alongside either traffic view. Traffic and Heatmap are two readings of
+one capture — they share the capture, its controls and its event stream, so
+starting one starts both and switching tabs never restarts anything.
 
 - **Click** a node to open its details; a node with children also expands/collapses.
 - **Search** matches hostname, IP, MAC, vendor, OS, port number and service name, and prunes the tree to matching branches.
 - **Group** by device type, by vendor, or flat.
 - **Legend** entries filter the map by device type.
 - **Export** the current map as a standalone SVG, or the scan as JSON.
-- Keys: `/` search, `f` fit, `e` expand all, `c` collapse all, `t` switch tab,
+- Keys: `/` search, `f` fit, `e` expand all, `c` collapse all, `t` next tab,
   `Esc` close.
 
 Live scan progress streams to the page over SSE, so you can watch nmap's own
@@ -137,7 +143,8 @@ percentage while it works.
 
 Traffic gets its own event stream because a snapshot arrives every second and is
 large; mixing them into `/api/events` would push the scan events a late client
-replays out of the buffer.
+replays out of the buffer. The heatmap adds no routes of its own — it is a second
+reading of the same snapshot.
 
 The server binds to loopback by default and serves only `web/` plus four
 allow-listed modules from `src/lib/`. Interface names and BPF expressions from
@@ -293,6 +300,51 @@ reported in the notes rather than silently lost.
 browser as `/shared/flows.js`, so the terminal table and the web graph are built
 from one implementation.
 
+## The traffic heatmap
+
+The force graph shows *how much*; the heatmap shows *when*. One row per device,
+one column per second, each cell shaded by what crossed it in that second. A
+device that moved 40 MB in one burst and one that trickled the same amount over
+two minutes are the same size on the graph and obviously different here.
+
+```
+device                sent      recv   activity
+──────────────────────────────────────────────────────────────
+this machine         28 kB    1.4 kB   ▂▃▅███▇▅▃▂▁    ▁▂▃▂▁
+diskstation         480 kB      12 kB          ▁▂▅███████▇▅▃
+living-room-sonos      0 B     4.2 kB   ▁▁▂▁▁▂▁▁▁▂▁▁▁▂▁▁▁▂▁▁
+```
+
+- **Rank by** switches the ordering and the shading between `total`, `sent`
+  (top senders) and `received` (top consumers). Direction comes from separate
+  counters in the flow model, not from splitting a total after the fact, so the
+  two rankings are genuinely different orderings and not the same list twice.
+- Both totals sit beside every row whichever metric is ranking, so a
+  top-senders view still shows what each device pulled down. The active column
+  is highlighted.
+- **Scale** is shared across rows by default, which is what makes a ranked view
+  comparable. Switching to per-row rescales each strip to its own peak, which
+  reveals the shape of a quiet device's activity that a shared scale flattens.
+- Shading is square-rooted. Byte counts are heavy-tailed, and on a linear ramp
+  everything but the single busiest second reads as idle.
+- The window trims to however long the capture has actually run, so a
+  ten-second capture fills the strip instead of hiding in its last few columns.
+- Hovering a cell gives the exact figure and timestamp; clicking a row opens the
+  device, with links across to the same device in the traffic map and the
+  topology tree.
+- **CSV** exports the whole grid — one row per device, one column per second —
+  for anything you would rather do in a spreadsheet.
+
+Without a packet capture there are no byte counts, so the rows rank by
+connection count and the strips show when connections were first seen. That is
+much coarser, and the sidebar says which method produced the numbers.
+
+The same table is available in the terminal, block characters and all:
+
+```bash
+node src/cli.js traffic --seconds 30 --sudo --rank sent
+```
+
 ## Project layout
 
 ```
@@ -305,7 +357,7 @@ src/traffic/index.js     traffic monitor: picks a method, aggregates, snapshots
 src/traffic/tcpdump.js   capture driver and packet-line parsing (3 tiers)
 src/traffic/connections.js  open-socket sampling and process attribution
 src/lib/topology.js      flat model → tree (shared with the browser)
-src/lib/flows.js         packets → flows → graph, endpoint identity (shared)
+src/lib/flows.js         packets → flows → graph, identity, ranking (shared)
 src/lib/mac.js           MAC formatting and address-type tests (shared)
 src/lib/classify.js      device-type inference (shared with the browser)
 src/lib/names.js         mDNS / NetBIOS / reverse-DNS name resolution
@@ -314,7 +366,10 @@ src/lib/net.js           interfaces, routes, CIDR math
 src/lib/xml.js           minimal XML parser for nmap output
 web/app.js               topology tree view + tab shell
 web/traffic.js           traffic graph view
-web/canvas.js            pan/zoom/fit and SVG export, shared by both views
+web/heatmap.js           traffic heatmap view
+web/traffic-store.js     one capture, shared by both traffic views
+web/capture-controls.js  the shared sidebar capture block
+web/canvas.js            pan/zoom/fit and SVG export, shared by the map views
 data/latest.json         most recent scan
 ```
 
@@ -341,6 +396,16 @@ devices appear as soon as they broadcast.
 
 **Traffic shows "conns" instead of bytes.** Same cause: no capture, so there are
 no byte counts to show. The sidebar's vantage panel says which method is running.
+
+**The heatmap is empty but the traffic map has data.** The ranking needs a
+non-zero figure in the chosen direction. Nothing has *sent* anything if you are
+watching a download, and vice versa — the card says which, and ranking by total
+always shows every endpoint that moved anything.
+
+**The heatmap and the traffic map disagree about what is running.** They should
+not: they share one capture, one event stream and one set of controls, so
+starting or stopping from either affects both. If they diverge, reload — the
+views rebuild from the server's snapshot rather than from anything they held.
 
 **The traffic map says "Nothing matches".** A search or a traffic-type filter is
 hiding everything the capture found. The card offers a button to clear both.

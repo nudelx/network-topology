@@ -1,7 +1,10 @@
 import { buildTree, countDevices } from '/shared/topology.js';
 import { CATEGORIES } from '/shared/classify.js';
 import { createCanvas, exportSvgFile, download } from '/canvas.js';
+import { createTrafficStore } from '/traffic-store.js';
+import { createCaptureControls } from '/capture-controls.js';
 import { createTrafficView } from '/traffic.js';
+import { createHeatmapView } from '/heatmap.js';
 
 /**
  * Topology map front-end. Imports the same tree builder the CLI uses, lays the
@@ -663,7 +666,8 @@ const views = {
     closeDrawer,
     focusSearch: () => dom.search.focus(),
   },
-  traffic: null, // created lazily below, once the DOM it needs exists
+  traffic: null, // both created below, once the DOM they need exists
+  heatmap: null,
 };
 let activeView = 'topology';
 
@@ -680,7 +684,9 @@ function showView(name) {
     section.hidden = section.dataset.view !== name;
   }
   for (const pane of document.querySelectorAll('.pane')) {
-    pane.hidden = pane.dataset.pane !== name;
+    // A pane may serve several views: the capture controls are shared by the
+    // traffic map and the heatmap, which are two readings of one capture.
+    pane.hidden = !(pane.dataset.pane || '').split(/\s+/).includes(name);
   }
   views[previous]?.hide?.();
   // A hidden view has no layout and so cannot measure itself; show() fits only
@@ -757,7 +763,10 @@ function bind() {
     if (e.key === '/') { e.preventDefault(); current.focusSearch?.(); }
     else if (e.key === 'Escape') current.closeDrawer?.();
     else if (e.key === 'f') current.fit?.();
-    else if (e.key === 't') showView(activeView === 'topology' ? 'traffic' : 'topology');
+    else if (e.key === 't') {
+      const order = ['topology', 'traffic', 'heatmap'];
+      showView(order[(order.indexOf(activeView) + 1) % order.length]);
+    }
     else if (activeView === 'topology' && e.key === 'e') setAllCollapsed(false);
     else if (activeView === 'topology' && e.key === 'c') setAllCollapsed(true);
   });
@@ -769,9 +778,28 @@ function bind() {
   });
 }
 
+// One store, so the two traffic views share a capture, an event stream and a
+// single set of start/stop controls.
+const trafficStore = createTrafficStore();
+// Owns the sidebar capture block, which both traffic views share and which must
+// keep updating whichever tab is on screen.
+const captureControls = createCaptureControls({ store: trafficStore });
+
 views.traffic = createTrafficView({
+  store: trafficStore,
+  controls: captureControls,
   getModel: () => state.model,
   onShowInTopology: showInTopology,
+});
+
+views.heatmap = createHeatmapView({
+  store: trafficStore,
+  getModel: () => state.model,
+  onShowInTopology: showInTopology,
+  onShowInTraffic: (nodeId) => {
+    showView('traffic');
+    views.traffic.select?.(nodeId);
+  },
 });
 
 bind();

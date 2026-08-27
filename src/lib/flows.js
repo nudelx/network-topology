@@ -232,12 +232,14 @@ export class FlowTable {
     bucketMs = 1000,
     windowBuckets = 90,
     maxFlows = 4000,
+    maxEndpoints = 3000,
     selfIps = [],
     localCidrs = [],
   } = {}) {
     this.bucketMs = bucketMs;
     this.windowBuckets = windowBuckets;
     this.maxFlows = maxFlows;
+    this.maxEndpoints = maxEndpoints;
     this.selfIps = new Set(selfIps);
     this.isLocal = cidrMatcher(localCidrs);
 
@@ -279,8 +281,12 @@ export class FlowTable {
         macs: new Set(),
         firstSeen: null,
         lastSeen: null,
-        ring: new Ring(this.windowBuckets),
+        // Kept apart rather than as one total, so "top senders" and "top
+        // consumers" are answerable over time and not just in aggregate.
+        sentRing: new Ring(this.windowBuckets),
+        recvRing: new Ring(this.windowBuckets),
       };
+      if (this.endpoints.size >= this.maxEndpoints) this.evictEndpoints();
       this.endpoints.set(ip, entry);
     }
     return entry;
@@ -371,21 +377,37 @@ export class FlowTable {
       if (entry.firstSeen === null) entry.firstSeen = at;
       entry.lastSeen = at;
       entry.peers.add(peer);
-      entry.ring.add(bucket, bytes);
       bump(entry.classes, cls, bytes, count);
       if (port != null) bump(entry.ports, port, bytes, count);
       if (packet.process) entry.processes.add(packet.process);
       if (sending) {
         entry.sentBytes += bytes;
         entry.sentPackets += count;
+        entry.sentRing.add(bucket, bytes);
       } else {
         entry.recvBytes += bytes;
         entry.recvPackets += count;
+        entry.recvRing.add(bucket, bytes);
       }
     }
 
     this.noteMac(src, packet.srcMac);
     this.noteMac(dst, packet.dstMac);
+  }
+
+  /**
+   * Endpoints hold two ring buffers each, so an unbounded table is real memory.
+   * A browsing session touches hundreds of CDN addresses, and the coldest are
+   * the least interesting, so they go first.
+   */
+  evictEndpoints() {
+    const victims = [...this.endpoints.values()]
+      .sort((x, y) => (x.lastSeen ?? 0) - (y.lastSeen ?? 0))
+      .slice(0, Math.max(1, Math.floor(this.maxEndpoints / 10)));
+    for (const entry of victims) {
+      this.evictedEndpoints = (this.evictedEndpoints || 0) + 1;
+      this.endpoints.delete(entry.ip);
+    }
   }
 
   /** Drop the coldest tenth of the table so a busy link cannot grow it forever. */
@@ -458,7 +480,8 @@ export class FlowTable {
         macs: [...entry.macs],
         classes: topOf(entry.classes, 4),
         ports: topOf(entry.ports, 6, (port) => ({ port, label: portLabel(port) })),
-        series: index < seriesFor ? entry.ring.read(bucket) : null,
+        sentSeries: index < seriesFor ? entry.sentRing.read(bucket) : null,
+        recvSeries: index < seriesFor ? entry.recvRing.read(bucket) : null,
       })),
       flows: flows.slice(0, maxFlows).map(({ flow, bytes, packets }, index) => ({
         key: flow.key,
@@ -486,6 +509,10 @@ export class FlowTable {
       truncated: {
         flows: Math.max(0, flows.length - maxFlows),
         endpoints: Math.max(0, endpoints.length - maxEndpoints),
+      },
+      evicted: {
+        flows: this.dropped,
+        endpoints: this.evictedEndpoints || 0,
       },
     };
   }
@@ -667,6 +694,15 @@ function mergeCounters(target, additions) {
   }
 }
 
+/** Elementwise sum of two series, either of which may be absent. */
+export function addSeries(a, b) {
+  if (!a) return b ? b.slice() : null;
+  if (!b) return a.slice();
+  const out = new Array(Math.max(a.length, b.length));
+  for (let i = 0; i < out.length; i++) out[i] = (a[i] || 0) + (b[i] || 0);
+  return out;
+}
+
 function sumSeries(target, series) {
   if (!series) return target;
   if (!target) return series.slice();
@@ -734,7 +770,8 @@ export function buildFlowGraph({ snapshot, model = null, options = {} } = {}) {
         processes: new Set(),
         classes: new Map(),
         ports: new Map(),
-        series: null,
+        sentSeries: null,
+        recvSeries: null,
         lastSeen: 0,
       };
       nodes.set(id, node);
@@ -810,7 +847,8 @@ export function buildFlowGraph({ snapshot, model = null, options = {} } = {}) {
     node.recvPackets += endpoint.recvPackets;
     node.peerCount += endpoint.peerCount;
     node.lastSeen = Math.max(node.lastSeen, endpoint.lastSeen || 0);
-    node.series = sumSeries(node.series, endpoint.series);
+    node.sentSeries = sumSeries(node.sentSeries, endpoint.sentSeries);
+    node.recvSeries = sumSeries(node.recvSeries, endpoint.recvSeries);
     for (const name of endpoint.processes || []) node.processes.add(name);
     mergeCounters(node.classes, endpoint.classes);
     mergeCounters(node.ports, endpoint.ports);
@@ -898,6 +936,8 @@ export function buildFlowGraph({ snapshot, model = null, options = {} } = {}) {
     ...node,
     bytes: node.sentBytes + node.recvBytes,
     packets: node.sentPackets + node.recvPackets,
+    // Sparklines want one line; the heatmap wants the two directions apart.
+    series: addSeries(node.sentSeries, node.recvSeries),
     classes: finish(node.classes, 4),
     ports: finish(node.ports, 6),
     processes: [...node.processes],
@@ -1057,6 +1097,111 @@ export function formatWeight(value, unit) {
 export function weightNoun(unit, value) {
   if (unit !== 'connections') return 'bytes';
   return value === 1 ? 'connection' : 'connections';
+}
+
+// Eight levels of block, so a terminal row carries the same shape the web
+// heatmap shades. Shared with the browser like everything else here.
+const SPARK_LEVELS = '▁▂▃▄▅▆▇█';
+
+/**
+ * A per-second series rendered as blocks, downsampled to `width` columns by
+ * taking each group's maximum — a mean would smooth away exactly the bursts
+ * the picture is for.
+ */
+export function sparkText(series, { width = 40, max = null } = {}) {
+  const values = series || [];
+  if (!values.length) return ' '.repeat(width);
+  const groups = new Array(width).fill(0);
+  const per = values.length / width;
+  for (let i = 0; i < values.length; i++) {
+    const slot = Math.min(width - 1, Math.floor(i / per));
+    groups[slot] = Math.max(groups[slot], values[i]);
+  }
+  const peak = max || Math.max(1, ...groups);
+  return groups
+    .map((value) => {
+      if (value <= 0) return ' ';
+      // Square-rooted for the same reason the web view is: byte counts are
+      // heavy-tailed, and a linear ramp leaves everything but the peak blank.
+      const level = Math.min(
+        SPARK_LEVELS.length - 1,
+        Math.floor(Math.sqrt(value / peak) * (SPARK_LEVELS.length - 1)),
+      );
+      return SPARK_LEVELS[level];
+    })
+    .join('');
+}
+
+/**
+ * How many trailing buckets are worth drawing. A five-second capture into a
+ * ninety-second window would otherwise spend most of its width on time that
+ * had not happened yet, squeezing the actual data into a corner.
+ */
+export function visibleBuckets(graph) {
+  const total = graph?.window?.buckets || 90;
+  const bucketMs = graph?.window?.bucketMs || 1000;
+  const elapsed = Math.ceil((graph?.stats?.elapsedMs || 0) / bucketMs);
+  return Math.max(8, Math.min(total, elapsed + 1));
+}
+
+/** The last `count` entries of a series, padded if it is somehow shorter. */
+export function tailOf(series, count) {
+  if (!series) return null;
+  if (series.length <= count) return series.slice();
+  return series.slice(series.length - count);
+}
+
+const METRIC_PICK = {
+  total: (node) => node.bytes,
+  sent: (node) => node.sentBytes,
+  received: (node) => node.recvBytes,
+};
+
+const METRIC_SERIES = {
+  total: (node) => node.series,
+  sent: (node) => node.sentSeries,
+  received: (node) => node.recvSeries,
+};
+
+/**
+ * Ranked endpoints with both directions and an activity strip — the terminal
+ * form of the heatmap.
+ */
+export function endpointsToText(graph, { limit = 10, metric = 'total', width = 22, spark = 34 } = {}) {
+  const pick = METRIC_PICK[metric] || METRIC_PICK.total;
+  const series = METRIC_SERIES[metric] || METRIC_SERIES.total;
+  const unit = graph.unit || 'bytes';
+  const pad = (value, n) => (String(value).length > n
+    ? `${String(value).slice(0, n - 1)}…`
+    : String(value).padEnd(n));
+
+  const rows = graph.nodes
+    .map((node) => ({ node, weight: pick(node) || 0, series: series(node) }))
+    .filter((row) => row.weight > 0)
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, limit);
+
+  const lines = [];
+  lines.push(
+    `${pad('device', width)} ${'sent'.padStart(9)} ${'recv'.padStart(9)}  ${pad('activity', spark)}`,
+  );
+  lines.push('─'.repeat(width + 9 + 9 + spark + 4));
+  if (!rows.length) {
+    lines.push(`(nothing ${metric === 'total' ? 'recorded' : metric} in this window)`);
+    return lines;
+  }
+
+  // One scale across all rows, so the strips are comparable down the column.
+  const shown = visibleBuckets(graph);
+  const trimmed = rows.map((row) => ({ ...row, series: tailOf(row.series, shown) }));
+  const peak = Math.max(1, ...trimmed.flatMap((row) => row.series || [0]));
+  for (const row of trimmed) {
+    lines.push(
+      `${pad(row.node.label, width)} ${formatWeight(row.node.sentBytes, unit).padStart(9)} `
+      + `${formatWeight(row.node.recvBytes, unit).padStart(9)}  ${sparkText(row.series, { width: spark, max: peak })}`,
+    );
+  }
+  return lines;
 }
 
 /** Terminal table of the busiest edges, used by `topology traffic`. */
